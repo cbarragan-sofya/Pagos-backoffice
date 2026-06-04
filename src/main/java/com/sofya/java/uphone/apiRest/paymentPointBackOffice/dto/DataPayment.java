@@ -20,6 +20,7 @@ public class DataPayment {
     private BigDecimal amount;
     private String paymentDate;
     private Integer bankId;
+    private Boolean provisionalPayment=Boolean.FALSE;
     private List<AditionaDataPayment> aditionalData;
     
 
@@ -80,6 +81,14 @@ public class DataPayment {
 
     public void setBankId(Integer bankId) {
         this.bankId = bankId;
+    }
+
+    public Boolean getProvisionalPayment() {
+        return provisionalPayment;
+    }
+
+    public void setProvisionalPayment(Boolean provisionalPayment) {
+        this.provisionalPayment = provisionalPayment;
     }
     
 }
