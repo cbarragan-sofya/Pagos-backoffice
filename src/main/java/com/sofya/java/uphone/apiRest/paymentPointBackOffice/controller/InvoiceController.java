@@ -10,6 +10,7 @@ import com.mashape.unirest.http.HttpResponse;
 import com.mashape.unirest.http.Unirest;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.ConfigManager;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.Resource;
+import com.sofya.java.uphone.apiRest.paymentPointBackOffice.caching.LruPayments;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.caching.lru;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.dto.AditionaDataPayment;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.dto.AditionalDataConsult;
@@ -143,13 +144,15 @@ public class InvoiceController extends Resource {
 
     lru cache = new lru();
 
+    LruPayments cacheVouchers = new LruPayments();
+    
     @POST
     @Path("v1/invoice/consult")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces({"application/json"})
     public Response consult(@HeaderParam("Authorization") String token, ConsultInvoiceDTO consultInvoiceDTO) throws InterruptedException {
         InvoiceDTO invoiceDTO = new InvoiceDTO();
-        System.out.println("Consulta contrato NE: " + consultInvoiceDTO.getCounterpart());
+        System.out.println("Consulta contrato BACKOFFICE: " + consultInvoiceDTO.getCounterpart());
         try {
             Boolean flag = Boolean.FALSE;
             String tokenJwt = token.substring(7, token.length());
@@ -191,7 +194,7 @@ public class InvoiceController extends Resource {
                     type(MediaType.APPLICATION_JSON).
                     entity(new Response401DTO("Internal Server Error", e.getMessage(), "500", "/v1/invoice/consult")).build();
         }
-        System.out.println("Finalizando consulta contrato NE: " + consultInvoiceDTO.getCounterpart());
+        System.out.println("Finalizando consulta contrato BACKOFFICE: " + consultInvoiceDTO.getCounterpart());
         return response(Response.Status.OK, invoiceDTO);
     }
 
@@ -294,6 +297,7 @@ public class InvoiceController extends Resource {
 
     }
 
+    @Transactional(rollbackFor = Exception.class)
     @POST
     @Path("v1/invoice/conciliationVoucher")
     @Produces(MediaType.APPLICATION_JSON)
@@ -304,6 +308,7 @@ public class InvoiceController extends Resource {
     ) throws UphoneExceptionApiRest, PaymentException {
         List<Error> errorList = new ArrayList<Error>();
         try {
+            System.out.println(String.format("CONCILIANDO CONTRATO %s, voucher: %s", contractId, voucherNumber));
             Boolean flag = Boolean.FALSE;
             String tokenJwt = token.substring(7, token.length());
             JWebToken incomingToken = new JWebToken(tokenJwt);
@@ -324,6 +329,13 @@ public class InvoiceController extends Resource {
                         entity(new Response401DTO("Authorization Error", "The bearer token has expired.", "033", "/v1/invoice/conciliationVoucher")).build();
             }
 
+            if (cacheVouchers.validateCache(voucherNumber)) {
+                return Response.serverError().
+                        status(Response.Status.NOT_FOUND).
+                        type(MediaType.APPLICATION_JSON).
+                        entity(new Response400DTO("Error Contrato", String.format("El contrato: %s con número de voucher: %s se encuentra registrándose", contractId, voucherNumber), errorList, "022", "/api/v1/invoice/conciliationVoucher")).build();
+            }
+
             VoucherApi voucher = new VoucherApi();
             Integer entryId = null;
             Boolean isLastCuota = Boolean.FALSE;
@@ -332,6 +344,7 @@ public class InvoiceController extends Resource {
 
             //VALIDAR EXISTENCIA DE VOUCHER
             if (voucher == null) {
+                cacheVouchers.deleteElementCache(voucherNumber);
                 errorList.add(new Error("Error Contrato", String.format("No se pudo obtener el pago del contrato: %s con número de voucher: %s", contractId, voucherNumber)));
                 return Response.serverError().
                         status(Response.Status.NOT_FOUND).
@@ -341,6 +354,7 @@ public class InvoiceController extends Resource {
 
             //VALIDAR CONTRATO EN ESTADO PENDIENTE DE COMPROBACION
             if (voucher.getConciliationState().equals("C")) {
+                cacheVouchers.deleteElementCache(voucherNumber);
                 errorList.add(new Error("Error Contrato", String.format("El pago del contrato: %s con número de voucher: %s ya se encuentra conciliado", contractId, voucherNumber)));
                 return Response.serverError().
                         status(Response.Status.NOT_FOUND).
@@ -421,13 +435,9 @@ public class InvoiceController extends Resource {
                 pagoCabecera.setFechaConciliacion(dateNow);
                 pagoCabecera.setEntryBankId(paymentAccount.getEntryBankId());
                 this.pagoCabeceraService.update(pagoCabecera);
-
-                System.out.println("terminando conciliación");
-
                 userTransaction.commit();
                 paymentController.verificarCierreConexion();
                 voucher.setConciliationState(EstadoEnum.CONCILIACION_EXITOSA.getEstado());
-
             } catch (LogginException ex) {
                 System.out.println("Error Loggin usuario: " + ConfigManager.get("loggin"));
                 errorList.add(new Error("Error de conciliación", "No se pudo registrar la conciliación"));
@@ -438,9 +448,12 @@ public class InvoiceController extends Resource {
                 paymentController.verificarCierreConexion(Boolean.TRUE);
                 rollbackPayment();
             }
-
+            //ELIMINAR CONTRATO DE CACHE
+            cacheVouchers.deleteElementCache(voucherNumber);
+            System.out.println(String.format("FINALIZANDO CONCILIACION CONTRATO %s, voucher: %s", contractId, voucherNumber));
             return response(Response.Status.OK, voucher);
         } catch (PaymentInvoiceException e) {
+            cacheVouchers.deleteElementCache(voucherNumber);
             System.out.println("Error conciliación BACKOFFICE contrato: " + contractId + " " + e.getMessage());
             e.getResp400().setDetail("Error al registrar la conciliación de voucher");
             return Response.serverError().
@@ -449,12 +462,14 @@ public class InvoiceController extends Resource {
                     entity(e.getResp400()).build();
 
         } catch (NoSuchAlgorithmException ex) {
+            cacheVouchers.deleteElementCache(voucherNumber);
             System.out.println("Error conciliación BACKOFFICE contrato: " + contractId + ex.getMessage());
             return Response.serverError().
                     status(Response.Status.UNAUTHORIZED).
                     type(MediaType.APPLICATION_JSON).
                     entity(new Response401DTO("Authorization Error", "Bearer Token is invalid", "033", "/v1/invoice/conciliationVoucher")).build();
         } catch (Exception e) {
+            cacheVouchers.deleteElementCache(voucherNumber);
             System.out.println("Error conciliación BACKOFFICE contrato: " + contractId + e.getMessage());
             return Response.serverError().
                     status(Response.Status.INTERNAL_SERVER_ERROR).
@@ -464,6 +479,7 @@ public class InvoiceController extends Resource {
 
     }
 
+    @Transactional(rollbackFor = Exception.class)
     @POST
     @Path("v1/invoice/reversePaymentVoucher")
     @Produces(MediaType.APPLICATION_JSON)
@@ -473,6 +489,7 @@ public class InvoiceController extends Resource {
             @QueryParam("voucherNumber") String voucherNumber
     ) throws UphoneExceptionApiRest, PaymentException {
         try {
+            System.out.println(String.format("REVERSA CONTRATO %s, voucher: %s", contractId, voucherNumber));
             List<Error> errorList = new ArrayList<Error>();
             String tokenJwt = token.substring(7, token.length());
             JWebToken incomingToken = new JWebToken(tokenJwt);
@@ -514,9 +531,14 @@ public class InvoiceController extends Resource {
                         entity(new Response400DTO("Error Contrato", "Pago conciliado con anterioridad", errorList, "022", "/api/v1/invoice/reversePaymentVoucher")).build();
             }
             userTransaction.begin();
+            StringBuilder hcReverse = new StringBuilder("REVERSO DE PAGO VOUCHER " + voucherNumber + ", CUOTAS: ");
+            boolean primera = true;
 
             List<ProcesarCuotaDTO> procesarCuotaList = new ArrayList<ProcesarCuotaDTO>();
             for (CuotasVoucherApi cuotaUpdate : voucher.getCuotas()) {
+                if (!primera) {
+                    hcReverse.append(",");
+                }
                 Pago pago = new Pago();
                 Cuota cuota = new Cuota();
                 BigDecimal value = new BigDecimal(0);
@@ -542,6 +564,8 @@ public class InvoiceController extends Resource {
                 ProcesarCuotaDTO procesarCuotaDTO = new ProcesarCuotaDTO(cuotaUpdate.getCuotaNumber(), cuota.getValor().subtract(cuota.getSaldo()), cuota.getSaldo(),
                         cuota.getValor().compareTo(cuota.getSaldo()) == 0 ? "GENERADA" : cuota.getSaldo().compareTo(BigDecimal.ZERO) == 0 ? "PAGADA" : "NOTIFICADA");
                 procesarCuotaList.add(procesarCuotaDTO);
+                hcReverse.append(cuota.getNumeroCuota());
+                primera = false;
             }
             this.pagoCabeceraService.delete(voucher.getPaymentHeaderId());
             Contrato contrato = new Contrato();
@@ -556,18 +580,31 @@ public class InvoiceController extends Resource {
             if (!procesarPagoDTO.getCuotaList().isEmpty()) {
                 this.backOfficeSecurity.procesarPago(procesarPagoDTO);
             }
+            HistorialCrediticio historialCrediticio = new HistorialCrediticio();
+            historialCrediticio.setContrato(new Contrato(contrato.getId()));
+            historialCrediticio.setEstado(EstadoEnum.ACTIVO.getEstado());
+            historialCrediticio.setFecha(new Date());
+            historialCrediticio.setEmpleado(new Empleado(Integer.valueOf(ConfigManager.get("employeeId"))));
+            historialCrediticio.setObservacion(hcReverse.toString());
+            this.historialService.create(historialCrediticio);
+
             userTransaction.commit();
             voucher.setConciliationState(EstadoEnum.REVERSA_PAGO_EXITOSA.getEstado());
-
+            System.out.println(String.format("FINALIZANDO REVERSA CONTRATO %s, voucher: %s", contractId, voucherNumber));
             return response(Response.Status.OK, voucher);
         } catch (NoSuchAlgorithmException ex) {
-            System.out.println("Error conciliación BACKOFFICE contrato: " + contractId + ex.getMessage());
+            System.out.println("Error reversa BACKOFFICE contrato: " + contractId + ex.getMessage());
             return Response.serverError().
                     status(Response.Status.UNAUTHORIZED).
                     type(MediaType.APPLICATION_JSON).
                     entity(new Response401DTO("Authorization Error", "Bearer Token is invalid", "033", "/v1/invoice/reversePaymentVoucher")).build();
         } catch (Exception e) {
-            System.out.println("Error conciliación BACKOFFICE contrato: " + contractId + e.getMessage());
+            System.out.println("Error reversa BACKOFFICE contrato: " + contractId + e.getMessage());
+            try {
+                userTransaction.rollback();
+            } catch (Exception rollbackEx) {
+                System.out.println(rollbackEx);
+            }
             return Response.serverError().
                     status(Response.Status.INTERNAL_SERVER_ERROR).
                     type(MediaType.APPLICATION_JSON).

@@ -23,7 +23,7 @@ import javax.ws.rs.core.UriInfo;
 @Provider
 public class RateLimitingFilter implements ContainerRequestFilter {
     // REQUEST_LIMIT número de peticiones en TIME_WINDOW(segundos)
-    private static final long REQUEST_LIMIT = 1000;
+    private static final long REQUEST_LIMIT = 2000;
     private static final long TIME_WINDOW = 60;
     private static final ConcurrentHashMap<String, RequestCounter> requestCounts = new ConcurrentHashMap<>();
     @Context
