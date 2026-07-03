@@ -509,12 +509,20 @@ public class InvoiceController extends Resource {
                         type(MediaType.APPLICATION_JSON).
                         entity(new Response401DTO("Authorization Error", "The bearer token has expired.", "033", "/v1/invoice/reversePaymentVoucher")).build();
             }
+            
+            if (cacheVouchers.validateCache(voucherNumber)) {
+                return Response.serverError().
+                        status(Response.Status.NOT_FOUND).
+                        type(MediaType.APPLICATION_JSON).
+                        entity(new Response400DTO("Error Contrato", String.format("El contrato: %s con número de voucher: %s se encuentra reversándose", contractId, voucherNumber), errorList, "022", "/api/v1/invoice/reversePaymentVoucher")).build();
+            }
 
             VoucherApi voucher = new VoucherApi();
             voucher = getPaymentHeaderData(contractId, voucherNumber);
 
             //VALIDAR EXISTENCIA DE VOUCHER
             if (voucher == null) {
+                cacheVouchers.deleteElementCache(voucherNumber);
                 errorList.add(new Error("Error Contrato", String.format("No se pudo obtener el pago del contrato: %s con número de voucher: %s", contractId, voucherNumber)));
                 return Response.serverError().
                         status(Response.Status.NOT_FOUND).
@@ -524,6 +532,7 @@ public class InvoiceController extends Resource {
 
             //VALIDAR CONTRATO EN ESTADO PENDIENTE DE COMPROBACION
             if (voucher.getConciliationState().equals("C")) {
+                cacheVouchers.deleteElementCache(voucherNumber);
                 errorList.add(new Error("Error Contrato", String.format("El pago del contrato: %s con número de voucher: %s ya se encuentra conciliado", contractId, voucherNumber)));
                 return Response.serverError().
                         status(Response.Status.NOT_FOUND).
@@ -589,16 +598,19 @@ public class InvoiceController extends Resource {
             this.historialService.create(historialCrediticio);
 
             userTransaction.commit();
+            cacheVouchers.deleteElementCache(voucherNumber);
             voucher.setConciliationState(EstadoEnum.REVERSA_PAGO_EXITOSA.getEstado());
             System.out.println(String.format("FINALIZANDO REVERSA CONTRATO %s, voucher: %s", contractId, voucherNumber));
             return response(Response.Status.OK, voucher);
         } catch (NoSuchAlgorithmException ex) {
+            cacheVouchers.deleteElementCache(voucherNumber);
             System.out.println("Error reversa BACKOFFICE contrato: " + contractId + ex.getMessage());
             return Response.serverError().
                     status(Response.Status.UNAUTHORIZED).
                     type(MediaType.APPLICATION_JSON).
                     entity(new Response401DTO("Authorization Error", "Bearer Token is invalid", "033", "/v1/invoice/reversePaymentVoucher")).build();
         } catch (Exception e) {
+            cacheVouchers.deleteElementCache(voucherNumber);
             System.out.println("Error reversa BACKOFFICE contrato: " + contractId + e.getMessage());
             try {
                 userTransaction.rollback();
