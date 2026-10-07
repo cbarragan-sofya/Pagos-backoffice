@@ -374,10 +374,11 @@ public class InvoiceController extends Resource {
 
                 PagoCabecera pagoCabecera = this.pagoCabeceraService.findByPk(voucher.getPaymentHeaderId());
                 pagoCabecera.setEstado_conciliacion("C");
+                Date paymentDate = pagoCabecera.getFecha();
                 voucher.getPayment().setPagoCabeceraId(pagoCabecera.getId());
                 userTransaction.begin();
 
-                Payment paymentAccount = registerAccountPayment(dateNow, voucher.getCustomerId(), voucher.getContractId(), voucher.getTotalValue(), paymentController, voucher.getVoucher(), voucher.getPayment());
+                Payment paymentAccount = registerAccountPayment(paymentDate, voucher.getCustomerId(), voucher.getContractId(), voucher.getTotalValue(), paymentController, voucher.getVoucher(), voucher.getPayment());
                 List<ProcesarCuotaDTO> cuotaList = new ArrayList<ProcesarCuotaDTO>();
                 for (CuotasVoucherApi cuota : voucher.getCuotas()) {
                     Cuota cuotaUpdate = new Cuota();
