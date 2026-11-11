@@ -29,6 +29,7 @@ import com.sofya.java.uphone.apiRest.paymentPointBackOffice.dto.PaymentDTO;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.dto.PaymentResponseDTO;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.exception.ConsultInvoiceException;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.exception.PaymentInvoiceException;
+import com.sofya.java.uphone.apiRest.paymentPointBackOffice.exception.PessimisticException;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.exception.UphoneExceptionApiRest;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.jwt.JWebToken;
 import com.sofya.java.uphone.apiRest.paymentPointBackOffice.util.AsyncExecutor;
@@ -88,6 +89,9 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import javax.ejb.EJB;
 import javax.inject.Inject;
+import javax.persistence.EntityManager;
+import javax.persistence.LockModeType;
+import javax.persistence.PersistenceContext;
 import javax.ws.rs.HeaderParam;
 import javax.ws.rs.POST;
 import javax.ws.rs.Path;
@@ -139,13 +143,16 @@ public class InvoiceController extends Resource {
     @EJB
     HistorialCrediticioService historialService;
 
+    @PersistenceContext(unitName = "uphonePU")
+    private EntityManager em;
+
     @Inject
     private UserTransaction userTransaction;
 
     lru cache = new lru();
 
     LruPayments cacheVouchers = new LruPayments();
-    
+
     @POST
     @Path("v1/invoice/consult")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -510,7 +517,7 @@ public class InvoiceController extends Resource {
                         type(MediaType.APPLICATION_JSON).
                         entity(new Response401DTO("Authorization Error", "The bearer token has expired.", "033", "/v1/invoice/reversePaymentVoucher")).build();
             }
-            
+
             if (cacheVouchers.validateCache(voucherNumber)) {
                 return Response.serverError().
                         status(Response.Status.NOT_FOUND).
@@ -787,51 +794,51 @@ public class InvoiceController extends Resource {
             errorList.add(new Error("Error pago", String.format("El contrato %s tiene cuotas en estado PENDIENTE COMPROBACION", paymentDTO.getData().getCounterpart())));
             throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
         }
-
-        //validate voucher number local
-        if (this.pagoCabeceraDao.validateVoucherNumber(journalId.toString()) > 0) {
-            errorList.add(new Error("Error voucher", String.format("El número de voucher ingresado %s ya se encuentra registrado en el sistema", journalId)));
-            throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
-        }
-
-        //validate voucher server1
-        if (ConfigManager.get("SERVER1") != null && !ConfigManager.get("SERVER1").isEmpty()) {
-            validateVoucherBackoffice(journalId, ConfigManager.get("SERVER1"), token);
-        }
-
-        //validate voucher server2
-        if (ConfigManager.get("SERVER2") != null && !ConfigManager.get("SERVER2").isEmpty()) {
-            validateVoucherBackoffice(journalId, ConfigManager.get("SERVER2"), token);
-        }
-
-        BigDecimal saldo = BigDecimal.ZERO;
-        List<Cuota> cuotaList = this.cuotaDao.findByContratoIdPendientePago(Integer.valueOf(Integer.parseInt(paymentDTO.getData().getCounterpart())));
-        Cuota cuota = new Cuota();
-        cuota = cuota = cuotaList.get(0);
-
-        saldo = this.cuotaDao.getContractBalance(Integer.parseInt(paymentDTO.getData().getCounterpart()));
-
-        if (paymentDTO.getData().getAmount().compareTo(saldo) > 0) {
-            errorList.add(new Error("Error en notificación pago", String.format("El valor ingresado supera el saldo de la contrapartida: %s", saldo)));
-            throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
-        }
-
-        if (cuota.getSaldo().compareTo(BigDecimal.ZERO) == 0) {
-            errorList.add(new Error("Error en notificación pago", "No se pudo registrar el pago"));
-            throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
-        }
-
-        Pago pago = new Pago();
-
-        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
-        Date paymentDate = dateFormat.parse(paymentDTO.getData().getPaymentDate());
-        //PaymentController paymentController = new PaymentController();
         try {
+            userTransaction.begin();
+            Contrato contrato = em.find(Contrato.class, Integer.valueOf(paymentDTO.getData().getCounterpart()), LockModeType.PESSIMISTIC_WRITE);
+            //validate voucher number local
+            if (this.pagoCabeceraDao.validateVoucherNumber(journalId.toString()) > 0) {
+                errorList.add(new Error("Error voucher", String.format("El número de voucher ingresado %s ya se encuentra registrado en el sistema", journalId)));
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+            }
+ 
+            //validate voucher server1
+            if (ConfigManager.get("SERVER1") != null && !ConfigManager.get("SERVER1").isEmpty()) {
+                validateVoucherBackoffice(journalId, ConfigManager.get("SERVER1"), token);
+            }
+
+            //validate voucher server2
+            if (ConfigManager.get("SERVER2") != null && !ConfigManager.get("SERVER2").isEmpty()) {
+                validateVoucherBackoffice(journalId, ConfigManager.get("SERVER2"), token);
+            }
+
+            BigDecimal saldo = BigDecimal.ZERO;
+            List<Cuota> cuotaList = this.cuotaDao.findByContratoIdPendientePago(Integer.valueOf(Integer.parseInt(paymentDTO.getData().getCounterpart())));
+            Cuota cuota = new Cuota();
+            cuota = cuota = cuotaList.get(0);
+
+            saldo = this.cuotaDao.getContractBalance(Integer.parseInt(paymentDTO.getData().getCounterpart()));
+
+            if (paymentDTO.getData().getAmount().compareTo(saldo) > 0) {
+                errorList.add(new Error("Error en notificación pago", String.format("El valor ingresado supera el saldo de la contrapartida: %s", saldo)));
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+            }
+
+            if (cuota.getSaldo().compareTo(BigDecimal.ZERO) == 0) {
+                errorList.add(new Error("Error en notificación pago", "No se pudo registrar el pago"));
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+            }
+
+            Pago pago = new Pago();
+
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
+            Date paymentDate = dateFormat.parse(paymentDTO.getData().getPaymentDate());
+            //PaymentController paymentController = new PaymentController();
+
             if (cache.getElementFromCache("sessionId").equals("Not exist") || !checkSessionSIC(ConfigManager.get("loggin"), cache.getElementFromCache("sessionId"))) {
                 logginSic();
             }
-
-            userTransaction.begin();
 
             //REGISTRO DE PAGO SISTEMA CONTABLE
             try {
@@ -898,6 +905,13 @@ public class InvoiceController extends Resource {
             paymentResponse.setData(dataList);
             userTransaction.commit();
             paymentController.verificarCierreConexion();
+        } catch (PessimisticException ex) {
+            try {
+                userTransaction.rollback();
+            } catch (Exception rollbackEx) {
+                System.out.println(rollbackEx);
+            }
+            throw new PaymentInvoiceException(ex.getResp400(), Response.Status.BAD_REQUEST);
         } catch (LogginException ex) {
             System.out.println("Error Loggin NEGOCIO EFECTIVO");
             errorList.add(new Error("Error de pago", "No se pudo registrar el pago"));
@@ -906,7 +920,6 @@ public class InvoiceController extends Resource {
             System.out.println("Error Pago: " + e.getMessage());
             System.out.println("Rolback contable");
             paymentController.verificarCierreConexion(Boolean.TRUE);
-
             rollbackPayment();
         }
         //TERMINAR CONTRATO
@@ -1093,7 +1106,7 @@ public class InvoiceController extends Resource {
         cache.putElementInCache("sessionId", sessionId.split("\\|")[1]);
     }
 
-    public void validateVoucherBackoffice(String voucherNumber, String server, String token) throws PaymentInvoiceException {
+    public void validateVoucherBackoffice(String voucherNumber, String server, String token) throws PaymentInvoiceException, PessimisticException {
         List<Error> errorList = new ArrayList<Error>();
         try {
             Integer resp = 0;
@@ -1105,18 +1118,18 @@ public class InvoiceController extends Resource {
 
             if (response.getStatus() != Response.Status.OK.getStatusCode()) {
                 errorList.add(new Error("Error voucher", String.format("Error, no se pudo obtener información del voucher: %s en el sistema: %s ", voucherNumber, server)));
-                throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
             }
 
             Gson gson = new Gson();
             resp = gson.fromJson(response.getBody(), Integer.class);
             if (resp > 0) {
                 errorList.add(new Error("Error voucher", String.format("El número de voucher ingresado %s ya se encuentra registrado en el sistema: %s", voucherNumber, server)));
-                throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
             }
         } catch (Exception ex) {
             errorList.add(new Error("Error voucher", String.format("Error al validar voucher")));
-            throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+            throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
         }
     }
 
