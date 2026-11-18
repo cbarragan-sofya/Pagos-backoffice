@@ -700,7 +700,12 @@ public class InvoiceController extends Resource {
         Cuota mora = new Cuota();
         cuota = cuotaList.get(0);
         //generar moras
-        this.contratoService.findByCedulaIdContratosAprobados(cuota.getContrato().getCliente().getCedula());
+
+        try {
+            this.backOfficeSecurity.validateTag(Integer.valueOf(contractId));
+        } catch (Exception e) {
+            System.out.println("Error al actualizar tag contrato: " + contractId);
+        }
 
         //SEND INFO CUOTA
         InvoiceItemConsult invoiceItemCuota = new InvoiceItemConsult();
@@ -802,7 +807,7 @@ public class InvoiceController extends Resource {
                 errorList.add(new Error("Error voucher", String.format("El número de voucher ingresado %s ya se encuentra registrado en el sistema", journalId)));
                 throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
             }
- 
+
             //validate voucher server1
             if (ConfigManager.get("SERVER1") != null && !ConfigManager.get("SERVER1").isEmpty()) {
                 validateVoucherBackoffice(journalId, ConfigManager.get("SERVER1"), token);
