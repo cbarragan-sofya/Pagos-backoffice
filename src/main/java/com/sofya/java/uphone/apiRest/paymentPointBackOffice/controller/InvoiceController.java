@@ -794,14 +794,16 @@ public class InvoiceController extends Resource {
             throw new PaymentInvoiceException(new Response400DTO("Missing mandatory fields", "The input fields are not correct", errorList, "022", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
         }
 
-        //validate quotas in state PENDIENTE_COMPROBACION
-        if (this.cuotaDao.verifyPendienteComprobacion(Integer.valueOf(paymentDTO.getData().getCounterpart()))) {
-            errorList.add(new Error("Error pago", String.format("El contrato %s tiene cuotas en estado PENDIENTE COMPROBACION", paymentDTO.getData().getCounterpart())));
-            throw new PaymentInvoiceException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
-        }
         try {
             userTransaction.begin();
             Contrato contrato = em.find(Contrato.class, Integer.valueOf(paymentDTO.getData().getCounterpart()), LockModeType.PESSIMISTIC_WRITE);
+
+            //validate quotas in state PENDIENTE_COMPROBACION
+            if (this.cuotaDao.verifyPendienteComprobacion(Integer.valueOf(paymentDTO.getData().getCounterpart()))) {
+                errorList.add(new Error("Error pago", String.format("El contrato %s tiene cuotas en estado PENDIENTE COMPROBACION", paymentDTO.getData().getCounterpart())));
+                throw new PessimisticException(new Response400DTO("Error en notificación pago", "Error en notificación pago", errorList, "EC004", "/api/v1/invoice/payment"), Response.Status.BAD_REQUEST);
+            }
+
             //validate voucher number local
             if (this.pagoCabeceraDao.validateVoucherNumber(journalId.toString()) > 0) {
                 errorList.add(new Error("Error voucher", String.format("El número de voucher ingresado %s ya se encuentra registrado en el sistema", journalId)));
